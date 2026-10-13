@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">IonStack Root</string>
+    <string name="status_idle">Not Rooted</string>
+    <string name="btn_root">Root Device</string>
+    <string name="btn_sysui">Restart SystemUI</string>
+    <string name="btn_ksu">Load KernelSU</string>
+</resources>
