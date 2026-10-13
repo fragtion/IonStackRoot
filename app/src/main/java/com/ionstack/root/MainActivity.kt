@@ -4,6 +4,10 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
 import android.view.View
 import android.widget.Button
 import android.widget.ScrollView
@@ -21,6 +25,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var ksuBtn: Button
 
     private var adb: AdbShell? = null
+
+    // persistent ANSI state across log() calls
+    private var ansiColor: Int = COLOR_SHELL
+    private var ansiBold: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -46,10 +54,81 @@ class MainActivity : AppCompatActivity() {
         checkRootOnStartup()
     }
 
+    // -- ANSI color parsing --------------------------------------------------
+
+    companion object {
+        private const val COLOR_APP = 0xFF00FF41.toInt()      // our messages: green
+        private const val COLOR_SHELL = 0xFFE0E0E0.toInt()   // script output default: white
+
+        private val ANSI_REGEX = Regex("\u001b\\[(\\d+(?:;\\d+)*)m")
+
+        private val SGR_COLORS = mapOf(
+            30 to 0xFF555555.toInt(),  // black
+            31 to 0xFFFF5555.toInt(),  // red
+            32 to 0xFF50FA7B.toInt(),  // green
+            33 to 0xFFF1FA8C.toInt(),  // yellow
+            34 to 0xFF8888FF.toInt(),  // blue
+            35 to 0xFFFF79C6.toInt(),  // magenta
+            36 to 0xFF8BE9FD.toInt(),  // cyan
+            37 to 0xFFE0E0E0.toInt(),  // white
+            90 to 0xFF888888.toInt(),  // bright black
+            91 to 0xFFFF6E6E.toInt(),  // bright red
+            92 to 0xFF69FF94.toInt(),  // bright green
+            93 to 0xFFFFFFA5.toInt(),  // bright yellow
+            94 to 0xFFD6ACFF.toInt(),  // bright blue
+            95 to 0xFFFF92DF.toInt(),  // bright magenta
+            96 to 0xFFA4FFFF.toInt(),  // bright cyan
+            97 to 0xFFFFFFFF.toInt(),  // bright white
+        )
+    }
+
+    private fun parseAnsi(text: String): SpannableStringBuilder {
+        val ssb = SpannableStringBuilder()
+        var lastEnd = 0
+
+        for (match in ANSI_REGEX.findAll(text)) {
+            val before = text.substring(lastEnd, match.range.first)
+            if (before.isNotEmpty()) appendStyled(ssb, before)
+
+            for (code in match.groupValues[1].split(";").map { it.toIntOrNull() ?: 0 }) {
+                when {
+                    code == 0 -> { ansiColor = COLOR_SHELL; ansiBold = false }
+                    code == 1 -> ansiBold = true
+                    code == 22 -> ansiBold = false
+                    code in SGR_COLORS -> ansiColor = SGR_COLORS[code]!!
+                }
+            }
+            lastEnd = match.range.last + 1
+        }
+
+        val remaining = text.substring(lastEnd)
+        if (remaining.isNotEmpty()) appendStyled(ssb, remaining)
+        return ssb
+    }
+
+    private fun appendStyled(ssb: SpannableStringBuilder, text: String) {
+        val start = ssb.length
+        ssb.append(text)
+        ssb.setSpan(ForegroundColorSpan(ansiColor), start, ssb.length,
+            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        if (ansiBold) {
+            ssb.setSpan(StyleSpan(Typeface.BOLD), start, ssb.length,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+    }
+
     // -- helpers -------------------------------------------------------------
 
     private fun log(text: String) = runOnUiThread {
-        logView.append(text)
+        logView.append(parseAnsi(text))
+        logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun logApp(text: String) = runOnUiThread {
+        val ssb = SpannableStringBuilder(text)
+        ssb.setSpan(ForegroundColorSpan(COLOR_APP), 0, ssb.length,
+            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        logView.append(ssb)
         logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
@@ -60,7 +139,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectAdb(promptAuth: Boolean = true): AdbShell {
         adb?.let { if (it.isConnected) return it }
-        val client = AdbShell(this) { msg -> log(msg) }
+        val client = AdbShell(this) { msg -> logApp(msg) }
         client.connect(promptAuth = promptAuth)
         adb = client
         return client
@@ -81,7 +160,7 @@ class MainActivity : AppCompatActivity() {
         Thread {
             try {
                 val client = connectAdb(promptAuth = false)
-                log("[*] Checking root status…\n")
+                logApp("[*] Checking root status…\n")
                 val sb = StringBuilder()
                 client.shellExec(
                     "/data/local/tmp/cve-2026-43499-root -c 'id'"
@@ -94,12 +173,12 @@ class MainActivity : AppCompatActivity() {
                         sysUiBtn.visibility = View.VISIBLE
                         ksuBtn.visibility = View.VISIBLE
                     }
-                    log("[*] Already rooted: ${result.trim()}\n")
+                    logApp("[*] Already rooted: ${result.trim()}\n")
                 } else {
-                    log("[*] Not rooted yet\n")
+                    logApp("[*] Not rooted yet\n")
                 }
             } catch (e: Exception) {
-                log("[*] ADB check: ${e.message}\n")
+                logApp("[*] ADB check: ${e.message}\n")
             }
         }.start()
     }
@@ -111,25 +190,27 @@ class MainActivity : AppCompatActivity() {
         sysUiBtn.visibility = View.GONE
         ksuBtn.visibility = View.GONE
         logView.text = ""
+        ansiColor = COLOR_SHELL
+        ansiBold = false
         setStatus("Connecting…", Color.YELLOW)
 
         Thread {
             try {
-                log("[*] Connecting to ADB (localhost:5555)…\n")
-                log("[*] If prompted, tap 'Allow USB debugging' on the device\n\n")
+                logApp("[*] Connecting to ADB (localhost:5555)…\n")
+                logApp("[*] If prompted, tap 'Allow USB debugging' on the device\n\n")
                 val client = connectAdb()
-                log("[*] ADB connected\n\n")
+                logApp("[*] ADB connected\n\n")
                 setStatus("Rooting…", Color.YELLOW)
 
                 shellRun(client, "sh /data/local/tmp/root.sh")
 
-                log("\n[*] Verifying root…\n")
+                logApp("\n[*] Verifying root…\n")
                 val sb = StringBuilder()
                 client.shellExec(
                     "/data/local/tmp/cve-2026-43499-root -c 'id'"
                 ) { sb.append(it) }
                 val id = sb.toString()
-                log("[*] $id\n")
+                logApp("[*] $id\n")
 
                 if ("uid=0" in id) {
                     setStatus("Rooted", Color.parseColor("#00e676"))
@@ -137,26 +218,26 @@ class MainActivity : AppCompatActivity() {
                         sysUiBtn.visibility = View.VISIBLE
                         ksuBtn.visibility = View.VISIBLE
                     }
-                    log("\n[*] ROOT SUCCESSFUL\n")
+                    logApp("\n[*] ROOT SUCCESSFUL\n")
                 } else {
                     setStatus("Root failed", Color.RED)
-                    log("\n[!] Root verification failed\n")
+                    logApp("\n[!] Root verification failed\n")
                 }
             } catch (e: Exception) {
-                log("\n[!] ${e.message}\n")
+                logApp("\n[!] ${e.message}\n")
                 setStatus("Error", Color.RED)
 
                 if (e.message?.contains("refused", ignoreCase = true) == true ||
                     e.message?.contains("unreachable", ignoreCase = true) == true ||
                     e.message?.contains("timed out", ignoreCase = true) == true) {
-                    log("\n[!] Cannot reach ADB on localhost:5555\n")
-                    log("[!] Make sure wireless ADB is enabled:\n")
-                    log("[!]   adb tcpip 5555\n")
-                    log("[!] Or for persistent:\n")
-                    log("[!]   adb shell setprop persist.adb.tcp.port 5555\n")
-                    log("[!]\n")
-                    log("[!] If ADB is connected from another PC,\n")
-                    log("[!] disconnect it first (adb disconnect) and retry.\n")
+                    logApp("\n[!] Cannot reach ADB on localhost:5555\n")
+                    logApp("[!] Make sure wireless ADB is enabled:\n")
+                    logApp("[!]   adb tcpip 5555\n")
+                    logApp("[!] Or for persistent:\n")
+                    logApp("[!]   adb shell setprop persist.adb.tcp.port 5555\n")
+                    logApp("[!]\n")
+                    logApp("[!] If ADB is connected from another PC,\n")
+                    logApp("[!] disconnect it first (adb disconnect) and retry.\n")
                 }
             }
             runOnUiThread { rootBtn.isEnabled = true }
@@ -168,12 +249,12 @@ class MainActivity : AppCompatActivity() {
         Thread {
             try {
                 val client = connectAdb()
-                log("\n[*] Restarting SystemUI…\n")
+                logApp("\n[*] Restarting SystemUI…\n")
                 shellRun(client,
                     "/data/local/tmp/cve-2026-43499-root -c 'pkill -f com.android.systemui'")
-                log("[*] SystemUI restarted\n")
+                logApp("[*] SystemUI restarted\n")
             } catch (e: Exception) {
-                log("[!] ${e.message}\n")
+                logApp("[!] ${e.message}\n")
             }
             runOnUiThread { sysUiBtn.isEnabled = true }
         }.start()
@@ -184,12 +265,12 @@ class MainActivity : AppCompatActivity() {
         Thread {
             try {
                 val client = connectAdb()
-                log("\n[*] Loading KernelSU module…\n")
+                logApp("\n[*] Loading KernelSU module…\n")
                 shellRun(client,
                     "/data/local/tmp/cve-2026-43499-root -c 'insmod /data/local/tmp/kernelsu.ko'")
-                log("[*] Check KernelSU manager\n")
+                logApp("[*] Check KernelSU manager\n")
             } catch (e: Exception) {
-                log("[!] ${e.message}\n")
+                logApp("[!] ${e.message}\n")
             }
             runOnUiThread { ksuBtn.isEnabled = true }
         }.start()
