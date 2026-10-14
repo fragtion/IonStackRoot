@@ -153,10 +153,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun runShell(cmd: String): String {
-        val process = ProcessBuilder("sh", "-c", cmd)
-            .redirectErrorStream(true)
-            .start()
+    private fun runProcess(pb: ProcessBuilder): String {
+        pb.redirectErrorStream(true)
+        val process = pb.start()
         val sb = StringBuilder()
         process.inputStream.bufferedReader().use { reader ->
             val buf = CharArray(4096)
@@ -167,15 +166,21 @@ class MainActivity : AppCompatActivity() {
                 log(chunk)
             }
         }
-        process.waitFor()
+        val exitCode = process.waitFor()
+        if (exitCode != 0) {
+            logApp("[*] exit code: $exitCode" +
+                (if (exitCode == 139) " (SIGSEGV)" else if (exitCode == 137) " (SIGKILL)" else "") +
+                "\n")
+        }
         return sb.toString()
     }
 
     private fun rootExec(cmd: String): String {
-        val out = runShell("'$nativeDir/libionstack_root.so' -c '$cmd'")
+        val out = runProcess(ProcessBuilder(
+            "$nativeDir/libionstack_root.so", "-c", cmd))
         if ("Permission denied" !in out) return out
         logApp("[*] Exploit daemon unavailable, trying su…\n")
-        return runShell("su -c '$cmd'")
+        return runProcess(ProcessBuilder("su", "-c", cmd))
     }
 
     // -- startup check -------------------------------------------------------
@@ -213,16 +218,26 @@ class MainActivity : AppCompatActivity() {
 
         Thread {
             try {
+                val exploitBin = "$nativeDir/libionstack_exploit.so"
+                val exp32Lib = "$nativeDir/libionstack_exp32.so"
+                val rootBin = "$nativeDir/libionstack_root.so"
+                val ksuPath = "$dataDir/kernelsu.ko"
+
+                logApp("[*] exploit: $exploitBin\n")
+                logApp("[*] preload: $exp32Lib\n")
                 logApp("[*] Running exploit…\n\n")
 
-                val script = "LD_PRELOAD='$nativeDir/libionstack_exp32.so'" +
-                    " '$nativeDir/libionstack_exploit.so'" +
-                    " && '$nativeDir/libionstack_root.so' -c 'id'" +
-                    " && '$nativeDir/libionstack_root.so' -c" +
-                    " 'insmod $dataDir/kernelsu.ko'"
-                val output = runShell(script)
+                val pb = ProcessBuilder(exploitBin)
+                pb.environment()["LD_PRELOAD"] = exp32Lib
+                val output = runProcess(pb)
 
                 if ("exploit succeeded" in output) {
+                    logApp("\n[*] Verifying root…\n")
+                    runProcess(ProcessBuilder(rootBin, "-c", "id"))
+
+                    logApp("[*] Loading KernelSU…\n")
+                    runProcess(ProcessBuilder(rootBin, "-c", "insmod $ksuPath"))
+
                     setStatus("Rooted", Color.parseColor("#00e676"))
                     runOnUiThread {
                         sysUiBtn.visibility = View.VISIBLE
