@@ -13,6 +13,7 @@ import android.widget.Button
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
@@ -24,11 +25,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sysUiBtn: Button
     private lateinit var ksuBtn: Button
 
-    private var adb: AdbShell? = null
-
     // persistent ANSI state across log() calls
     private var ansiColor: Int = COLOR_SHELL
     private var ansiBold: Boolean = false
+
+    private val nativeDir by lazy { applicationInfo.nativeLibraryDir }
+    private val dataDir by lazy { filesDir.absolutePath }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +53,7 @@ class MainActivity : AppCompatActivity() {
         sysUiBtn.setOnClickListener { doRestartSystemUI() }
         ksuBtn.setOnClickListener { doLoadKsu() }
 
+        extractAssets()
         checkRootOnStartup()
     }
 
@@ -80,6 +83,8 @@ class MainActivity : AppCompatActivity() {
             96 to 0xFFA4FFFF.toInt(),  // bright cyan
             97 to 0xFFFFFFFF.toInt(),  // bright white
         )
+
+        private val ASSETS = listOf("kernelsu.ko", "patch_table.txt")
     }
 
     private fun parseAnsi(text: String): SpannableStringBuilder {
@@ -137,21 +142,40 @@ class MainActivity : AppCompatActivity() {
         (statusDot.background as GradientDrawable).setColor(color)
     }
 
-    private fun connectAdb(promptAuth: Boolean = true): AdbShell {
-        adb?.let { if (it.isConnected) return it }
-        val client = AdbShell(this) { msg -> logApp(msg) }
-        client.connect(promptAuth = promptAuth)
-        adb = client
-        return client
+    private fun extractAssets() {
+        for (name in ASSETS) {
+            val dest = File(filesDir, name)
+            if (!dest.exists()) {
+                assets.open(name).use { inp ->
+                    dest.outputStream().use { out -> inp.copyTo(out) }
+                }
+            }
+        }
     }
 
-    private fun shellRun(client: AdbShell, cmd: String): String {
+    private fun runShell(cmd: String): String {
+        val process = ProcessBuilder("sh", "-c", cmd)
+            .redirectErrorStream(true)
+            .start()
         val sb = StringBuilder()
-        client.shellExec(cmd) { chunk ->
-            sb.append(chunk)
-            log(chunk)
+        process.inputStream.bufferedReader().use { reader ->
+            val buf = CharArray(4096)
+            var n: Int
+            while (reader.read(buf).also { n = it } != -1) {
+                val chunk = String(buf, 0, n)
+                sb.append(chunk)
+                log(chunk)
+            }
         }
+        process.waitFor()
         return sb.toString()
+    }
+
+    private fun rootExec(cmd: String): String {
+        val out = runShell("'$nativeDir/libionstack_root.so' -c '$cmd'")
+        if ("Permission denied" !in out) return out
+        logApp("[*] Exploit daemon unavailable, trying su…\n")
+        return runShell("su -c '$cmd'")
     }
 
     // -- startup check -------------------------------------------------------
@@ -159,11 +183,10 @@ class MainActivity : AppCompatActivity() {
     private fun checkRootOnStartup() {
         Thread {
             try {
-                val client = connectAdb(promptAuth = false)
-                logApp("[*] Checking root status…\n")
-                val sb = StringBuilder()
-                client.shellExec("cat /proc/modules") { sb.append(it) }
-                val modules = sb.toString()
+                val process = ProcessBuilder("sh", "-c", "cat /proc/modules 2>/dev/null")
+                    .redirectErrorStream(true).start()
+                val modules = process.inputStream.bufferedReader().readText()
+                process.waitFor()
 
                 if ("kernelsu" in modules) {
                     setStatus("Rooted", Color.parseColor("#00e676"))
@@ -172,12 +195,8 @@ class MainActivity : AppCompatActivity() {
                         ksuBtn.visibility = View.VISIBLE
                     }
                     logApp("[*] KernelSU module loaded — already rooted\n")
-                } else {
-                    logApp("[*] Not rooted yet\n")
                 }
-            } catch (e: Exception) {
-                logApp("[*] ADB check: ${e.message}\n")
-            }
+            } catch (_: Exception) { }
         }.start()
     }
 
@@ -190,17 +209,18 @@ class MainActivity : AppCompatActivity() {
         logView.text = ""
         ansiColor = COLOR_SHELL
         ansiBold = false
-        setStatus("Connecting…", Color.YELLOW)
+        setStatus("Rooting…", Color.YELLOW)
 
         Thread {
             try {
-                logApp("[*] Connecting to ADB (localhost:5555)…\n")
-                logApp("[*] If prompted, tap 'Allow USB debugging' on the device\n\n")
-                val client = connectAdb()
-                logApp("[*] ADB connected\n\n")
-                setStatus("Rooting…", Color.YELLOW)
+                logApp("[*] Running exploit…\n\n")
 
-                val output = shellRun(client, "sh /data/local/tmp/root.sh")
+                val script = "LD_PRELOAD='$nativeDir/libionstack_exp32.so'" +
+                    " '$nativeDir/libionstack_exploit.so'" +
+                    " && '$nativeDir/libionstack_root.so' -c 'id'" +
+                    " && '$nativeDir/libionstack_root.so' -c" +
+                    " 'insmod $dataDir/kernelsu.ko'"
+                val output = runShell(script)
 
                 if ("exploit succeeded" in output) {
                     setStatus("Rooted", Color.parseColor("#00e676"))
@@ -216,39 +236,17 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 logApp("\n[!] ${e.message}\n")
                 setStatus("Error", Color.RED)
-
-                if (e.message?.contains("refused", ignoreCase = true) == true ||
-                    e.message?.contains("unreachable", ignoreCase = true) == true ||
-                    e.message?.contains("timed out", ignoreCase = true) == true) {
-                    logApp("\n[!] Cannot reach ADB on localhost:5555\n")
-                    logApp("[!] Make sure wireless ADB is enabled:\n")
-                    logApp("[!]   adb tcpip 5555\n")
-                    logApp("[!] Or for persistent:\n")
-                    logApp("[!]   adb shell setprop persist.adb.tcp.port 5555\n")
-                    logApp("[!]\n")
-                    logApp("[!] If ADB is connected from another PC,\n")
-                    logApp("[!] disconnect it first (adb disconnect) and retry.\n")
-                }
             }
             runOnUiThread { rootBtn.isEnabled = true }
         }.start()
-    }
-
-    private fun rootExec(client: AdbShell, cmd: String): String {
-        // Try exploit daemon first, fall back to KernelSU su
-        val out1 = shellRun(client, "/data/local/tmp/cve-2026-43499-root -c '$cmd'")
-        if ("Permission denied" !in out1) return out1
-        logApp("[*] Exploit daemon unavailable, trying su…\n")
-        return shellRun(client, "su -c '$cmd'")
     }
 
     private fun doRestartSystemUI() {
         sysUiBtn.isEnabled = false
         Thread {
             try {
-                val client = connectAdb()
                 logApp("\n[*] Restarting SystemUI…\n")
-                rootExec(client, "pkill -f com.android.systemui")
+                rootExec("pkill -f com.android.systemui")
                 logApp("[*] SystemUI restarted\n")
             } catch (e: Exception) {
                 logApp("[!] ${e.message}\n")
@@ -261,19 +259,13 @@ class MainActivity : AppCompatActivity() {
         ksuBtn.isEnabled = false
         Thread {
             try {
-                val client = connectAdb()
                 logApp("\n[*] Loading KernelSU module…\n")
-                rootExec(client, "insmod /data/local/tmp/kernelsu.ko")
+                rootExec("insmod $dataDir/kernelsu.ko")
                 logApp("[*] Check KernelSU manager\n")
             } catch (e: Exception) {
                 logApp("[!] ${e.message}\n")
             }
             runOnUiThread { ksuBtn.isEnabled = true }
         }.start()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        adb?.disconnect()
     }
 }
