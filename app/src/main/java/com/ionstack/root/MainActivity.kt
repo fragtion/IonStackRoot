@@ -225,7 +225,14 @@ class MainActivity : AppCompatActivity() {
 
                 logApp("[*] exploit: $exploitBin\n")
                 logApp("[*] preload: $exp32Lib\n")
-                logApp("[*] Running exploit…\n\n")
+                logApp("[*] uid: ${android.os.Process.myUid()}\n")
+
+                // Check if files exist and are executable
+                logApp("[*] exploit exists: ${File(exploitBin).exists()}\n")
+                logApp("[*] exp32 exists: ${File(exp32Lib).exists()}\n")
+                logApp("[*] exploit exec: ${File(exploitBin).canExecute()}\n\n")
+
+                logApp("[*] Running exploit with LD_PRELOAD…\n\n")
 
                 val pb = ProcessBuilder(exploitBin)
                 pb.environment()["LD_PRELOAD"] = exp32Lib
@@ -247,6 +254,24 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     setStatus("Root failed", Color.RED)
                     logApp("\n[!] Exploit did not report success\n")
+
+                    // Dump diagnostics
+                    logApp("\n[*] Checking logcat for denials…\n")
+                    try {
+                        val diag = ProcessBuilder("logcat", "-d", "-t", "30")
+                            .redirectErrorStream(true).start()
+                        val lines = diag.inputStream.bufferedReader().readLines()
+                        diag.waitFor()
+                        for (line in lines) {
+                            val lower = line.lowercase()
+                            if ("avc" in lower || "denied" in lower ||
+                                "linker" in lower || "preload" in lower ||
+                                "segv" in lower || "signal 11" in lower ||
+                                "ionstack" in lower) {
+                                log("$line\n")
+                            }
+                        }
+                    } catch (_: Exception) { }
                 }
             } catch (e: Exception) {
                 logApp("\n[!] ${e.message}\n")
