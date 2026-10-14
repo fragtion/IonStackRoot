@@ -182,6 +182,7 @@ class AdbShell(private val context: Context, private val log: ((String) -> Unit)
         val pubB64 = prefs.getString(PUB_KEY_PREF, null)
 
         if (privB64 != null && pubB64 != null) {
+            log?.invoke("[adb] loaded existing RSA keypair\n")
             val kf = KeyFactory.getInstance("RSA")
             return KeyPair(
                 kf.generatePublic(X509EncodedKeySpec(Base64.decode(pubB64, Base64.NO_WRAP))),
