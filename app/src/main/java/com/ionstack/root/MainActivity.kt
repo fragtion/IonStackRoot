@@ -162,18 +162,16 @@ class MainActivity : AppCompatActivity() {
                 val client = connectAdb(promptAuth = false)
                 logApp("[*] Checking root status…\n")
                 val sb = StringBuilder()
-                client.shellExec(
-                    "/data/local/tmp/cve-2026-43499-root -c 'id'"
-                ) { sb.append(it) }
-                val result = sb.toString()
+                client.shellExec("cat /proc/modules") { sb.append(it) }
+                val modules = sb.toString()
 
-                if ("uid=0" in result) {
+                if ("kernelsu" in modules) {
                     setStatus("Rooted", Color.parseColor("#00e676"))
                     runOnUiThread {
                         sysUiBtn.visibility = View.VISIBLE
                         ksuBtn.visibility = View.VISIBLE
                     }
-                    logApp("[*] Already rooted: ${result.trim()}\n")
+                    logApp("[*] KernelSU module loaded — already rooted\n")
                 } else {
                     logApp("[*] Not rooted yet\n")
                 }
@@ -202,42 +200,18 @@ class MainActivity : AppCompatActivity() {
                 logApp("[*] ADB connected\n\n")
                 setStatus("Rooting…", Color.YELLOW)
 
-                shellRun(client, "sh /data/local/tmp/root.sh")
+                val output = shellRun(client, "sh /data/local/tmp/root.sh")
 
-                logApp("\n[*] Verifying root…\n")
-                var id = ""
-                for (attempt in 1..5) {
-                    val sb = StringBuilder()
-                    client.shellExec(
-                        "/data/local/tmp/cve-2026-43499-root -c 'id'"
-                    ) { sb.append(it) }
-                    id = sb.toString()
-                    if ("uid=0" in id) break
-                    logApp("[*] Waiting for root daemon (attempt $attempt/5)…\n")
-                    Thread.sleep(2000)
-                }
-                logApp("[*] $id\n")
-
-                if ("uid=0" in id) {
+                if ("exploit succeeded" in output) {
                     setStatus("Rooted", Color.parseColor("#00e676"))
                     runOnUiThread {
                         sysUiBtn.visibility = View.VISIBLE
                         ksuBtn.visibility = View.VISIBLE
                     }
                     logApp("\n[*] ROOT SUCCESSFUL\n")
-
-                    // Inject our ADB key so future TCP connections auth without USB
-                    try {
-                        val keyLine = client.getPublicKeyLine()
-                        shellRun(client,
-                            "/data/local/tmp/cve-2026-43499-root -c 'grep -qF \"ionstack@root\"" +
-                            " /data/misc/adb/adb_keys 2>/dev/null || echo \"$keyLine\"" +
-                            " >> /data/misc/adb/adb_keys'")
-                        logApp("[*] ADB key authorized for TCP auth\n")
-                    } catch (_: Exception) { }
                 } else {
                     setStatus("Root failed", Color.RED)
-                    logApp("\n[!] Root verification failed\n")
+                    logApp("\n[!] Exploit did not report success\n")
                 }
             } catch (e: Exception) {
                 logApp("\n[!] ${e.message}\n")
@@ -260,14 +234,21 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    private fun rootExec(client: AdbShell, cmd: String): String {
+        // Try exploit daemon first, fall back to KernelSU su
+        val out1 = shellRun(client, "/data/local/tmp/cve-2026-43499-root -c '$cmd'")
+        if ("Permission denied" !in out1) return out1
+        logApp("[*] Exploit daemon unavailable, trying su…\n")
+        return shellRun(client, "su -c '$cmd'")
+    }
+
     private fun doRestartSystemUI() {
         sysUiBtn.isEnabled = false
         Thread {
             try {
                 val client = connectAdb()
                 logApp("\n[*] Restarting SystemUI…\n")
-                shellRun(client,
-                    "/data/local/tmp/cve-2026-43499-root -c 'pkill -f com.android.systemui'")
+                rootExec(client, "pkill -f com.android.systemui")
                 logApp("[*] SystemUI restarted\n")
             } catch (e: Exception) {
                 logApp("[!] ${e.message}\n")
@@ -282,8 +263,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 val client = connectAdb()
                 logApp("\n[*] Loading KernelSU module…\n")
-                shellRun(client,
-                    "/data/local/tmp/cve-2026-43499-root -c 'insmod /data/local/tmp/kernelsu.ko'")
+                rootExec(client, "insmod /data/local/tmp/kernelsu.ko")
                 logApp("[*] Check KernelSU manager\n")
             } catch (e: Exception) {
                 logApp("[!] ${e.message}\n")
