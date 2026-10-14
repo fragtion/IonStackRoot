@@ -107,6 +107,12 @@ class AdbShell(private val context: Context, private val log: ((String) -> Unit)
         socket = null; inp = null; out = null
     }
 
+    fun getPublicKeyLine(): String {
+        val kp = getOrCreateKeyPair()
+        val pub = kp.public as RSAPublicKey
+        return String(encodeAdbPublicKey(pub), Charsets.UTF_8).trimEnd('\u0000')
+    }
+
     // -- ADB wire protocol --------------------------------------------------
 
     private fun send(cmd: Int, arg0: Int, arg1: Int, data: ByteArray = ByteArray(0)) {

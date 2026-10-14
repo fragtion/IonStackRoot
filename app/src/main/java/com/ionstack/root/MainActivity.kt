@@ -219,6 +219,16 @@ class MainActivity : AppCompatActivity() {
                         ksuBtn.visibility = View.VISIBLE
                     }
                     logApp("\n[*] ROOT SUCCESSFUL\n")
+
+                    // Inject our ADB key so future TCP connections auth without USB
+                    try {
+                        val keyLine = client.getPublicKeyLine()
+                        shellRun(client,
+                            "/data/local/tmp/cve-2026-43499-root -c 'grep -qF \"ionstack@root\"" +
+                            " /data/misc/adb/adb_keys 2>/dev/null || echo \"$keyLine\"" +
+                            " >> /data/misc/adb/adb_keys'")
+                        logApp("[*] ADB key authorized for TCP auth\n")
+                    } catch (_: Exception) { }
                 } else {
                     setStatus("Root failed", Color.RED)
                     logApp("\n[!] Root verification failed\n")

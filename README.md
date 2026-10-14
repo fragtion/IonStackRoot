@@ -47,13 +47,19 @@ adb install IonStackRoot-debug.apk
 
 ## Usage
 
-1. **Tap "Root Device"** — the app connects to ADB, runs the exploit, and streams the log output. On first launch you'll see an "Allow USB debugging?" dialog on the device — tap Allow (and check "Always allow").
+1. **Tap "Root Device"** — the app connects to ADB, runs the exploit, and streams the log output.
 
 2. **Tap "Load KernelSU"** — loads the KernelSU-Next kernel module via `insmod`. Open the [KernelSU Next manager](https://github.com/sarabpal-dev/KernelSU-Next/releases/tag/v3.3.0-android12-5.10) app to manage superuser access.
 
 3. **Tap "Restart SystemUI"** — kills and restarts SystemUI. Useful after granting root to system apps or applying overlays.
 
 Root does not survive a reboot. Re-open the app and tap "Root Device" again after each restart.
+
+### First-time ADB authorization
+
+The "Allow USB debugging?" prompt only appears while a USB cable is connected (Android limitation). **Keep USB plugged in for your first root.** When the dialog appears, check "Always allow from this computer" and tap Allow.
+
+After the first successful root, the app automatically injects its ADB key into the device's trusted key store (`/data/misc/adb/adb_keys`) using root privileges. From that point on, all subsequent roots (including after reboot) work fully wirelessly — no USB needed.
 
 ## Building
 
