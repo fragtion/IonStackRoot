@@ -22,10 +22,13 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -69,6 +72,15 @@ public class MainActivity extends Activity implements PayloadStore.Log {
     private CheckBox forceCheck;
     private CheckBox darkCheck;
     private volatile Process activeProcess;
+
+    // KernelSU takes over after the late-load; the IonStack daemon socket then
+    // stops accepting connections, so root commands switch to KSU's su.
+    private volatile boolean ksuRoot;
+    private volatile String ksuSuPath = "su";
+
+    private static final String[] SU_CANDIDATES = {
+            "su", "/data/adb/ksu/bin/su", "/system/bin/su",
+    };
 
     private boolean isDarkEnabled() {
         SharedPreferences prefs = getSharedPreferences(UI_PREFS, MODE_PRIVATE);
@@ -246,15 +258,17 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         boolean granted = running && ShizukuBridge.isGranted();
         statusView.setText("Shizuku: " + (running ? (granted ? "running, granted" : "running, permission needed")
                 : "not running") +
-                "   |   Payload: " + (busy.get() ? "running" : "idle"));
+                "   |   Payload: " + (busy.get() ? "running" : "idle") +
+                "   |   Root: " + (ksuRoot ? "KernelSU" : "daemon"));
         grantButton.setEnabled(!busy.get());
         stageButton.setEnabled(!busy.get() && running && granted);
         runButton.setEnabled(!busy.get() && running && granted);
         stopButton.setEnabled(busy.get());
         loadKsuButton.setEnabled(!busy.get() && running && granted);
-        commandButton.setEnabled(!busy.get() && running && granted);
-        checkButton.setEnabled(!busy.get() && running && granted);
-        restartUiButton.setEnabled(!busy.get() && running && granted);
+        boolean rootReady = ksuRoot || (running && granted);
+        commandButton.setEnabled(!busy.get() && rootReady);
+        checkButton.setEnabled(!busy.get() && rootReady);
+        restartUiButton.setEnabled(!busy.get() && rootReady);
     }
 
     private void setBusy(boolean value) {
@@ -404,9 +418,17 @@ public class MainActivity extends Activity implements PayloadStore.Log {
                 stderr.join(2000);
                 appendLog("[*] kernelsu.sh exited (" + exit + ")\n");
 
-                String modules = ShizukuBridge.capture(
-                        new String[]{helper, "-c", "grep '^kernelsu ' /proc/modules"},
-                        null, PayloadStore.REMOTE_DIR).trim();
+                if (!ksuRoot && probeKsuRoot()) {
+                    appendLog("[+] KernelSU su available (" + ksuSuPath
+                            + "); root buttons now use it\n");
+                    ui.post(this::refreshStatus);
+                }
+
+                String modules = ksuRoot
+                        ? captureKsu("grep kernelsu /proc/modules")
+                        : ShizukuBridge.capture(
+                                new String[]{helper, "-c", "grep '^kernelsu ' /proc/modules"},
+                                null, PayloadStore.REMOTE_DIR).trim();
                 appendLog("[*] /proc/modules: "
                         + (modules.isEmpty() ? "(no kernelsu line)" : modules) + "\n");
             } catch (Throwable t) {
@@ -512,7 +534,7 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         if (busy.get()) {
             return;
         }
-        if (!ShizukuBridge.isRunning() || !ShizukuBridge.isGranted()) {
+        if (!ksuRoot && (!ShizukuBridge.isRunning() || !ShizukuBridge.isGranted())) {
             requestShizuku();
             return;
         }
@@ -529,7 +551,7 @@ public class MainActivity extends Activity implements PayloadStore.Log {
     }
 
     private void runRootCommandInternal(String command) {
-        if (!ShizukuBridge.isRunning() || !ShizukuBridge.isGranted()) {
+        if (!ksuRoot && (!ShizukuBridge.isRunning() || !ShizukuBridge.isGranted())) {
             requestShizuku();
             return;
         }
@@ -546,8 +568,12 @@ public class MainActivity extends Activity implements PayloadStore.Log {
     }
 
     private void executeRootCommandBlocking(String command) {
+        appendLog("$ " + command + "\n");
+        if (ksuRoot) {
+            runKsuCommand(command);
+            return;
+        }
         try {
-            appendLog("$ " + command + "\n");
             Process process = ShizukuBridge.exec(new String[]{
                     PayloadStore.remotePath("cve-2026-43499-root"), "-c", command
             }, null, "/data/local/tmp");
@@ -558,8 +584,83 @@ public class MainActivity extends Activity implements PayloadStore.Log {
             stdout.join(2000);
             stderr.join(2000);
             appendLog("[*] root command exited (" + exit + ")\n");
+            // 127 = the daemon socket is gone or unreachable. After a KernelSU
+            // late-load that is expected, so retry through KSU's own su.
+            if (exit == 127) {
+                appendLog("[*] IonStack daemon unreachable, checking KernelSU su\n");
+                if (probeKsuRoot()) {
+                    appendLog("[+] using KernelSU su (" + ksuSuPath + ")\n");
+                    runKsuCommand(command);
+                } else {
+                    appendLog("[-] no KernelSU su available either\n");
+                }
+            }
         } catch (Throwable t) {
             appendLog("[-] root command failed: " + t.getMessage() + "\n");
+        }
+    }
+
+    private String captureKsu(String command) {
+        return runQuiet(new String[]{"/system/bin/sh", "-c",
+                "exec " + ksuSuPath + " -c " + ShizukuBridge.shellQuote(command)}).trim();
+    }
+
+    private void runKsuCommand(String command) {
+        try {
+            Process process = new ProcessBuilder("/system/bin/sh", "-c",
+                    "exec " + ksuSuPath + " -c " + ShizukuBridge.shellQuote(command))
+                    .redirectErrorStream(true).start();
+            activeProcess = process;
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    appendLog(line + "\n");
+                }
+            }
+            int exit = process.waitFor();
+            appendLog("[*] root command exited (" + exit + ") [KernelSU]\n");
+        } catch (Throwable t) {
+            appendLog("[-] KernelSU su failed: " + t.getMessage() + "\n");
+        }
+    }
+
+    /** Probes su as the app uid; KernelSU grants this app, not the shell user. */
+    private boolean probeKsuRoot() {
+        for (String su : SU_CANDIDATES) {
+            String out = runQuiet(new String[]{"/system/bin/sh", "-c",
+                    "exec " + su + " -c id"});
+            if (out.contains("uid=0")) {
+                ksuSuPath = su;
+                ksuRoot = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String runQuiet(String[] cmd) {
+        Process process = null;
+        try {
+            process = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            if (!process.waitFor(8, TimeUnit.SECONDS)) {
+                return "";
+            }
+            StringBuilder out = new StringBuilder();
+            try (InputStream in = process.getInputStream()) {
+                byte[] buffer = new byte[4096];
+                int read;
+                while ((read = in.read(buffer)) > 0) {
+                    out.append(new String(buffer, 0, read));
+                }
+            }
+            return out.toString();
+        } catch (Throwable t) {
+            return "";
+        } finally {
+            if (process != null && process.isAlive()) {
+                process.destroy();
+            }
         }
     }
 
