@@ -2,6 +2,8 @@ package dev.ionstack.s908e;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.SharedPreferences;
+import android.content.res.Configuration;
 import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.os.Bundle;
@@ -42,6 +44,8 @@ public class MainActivity extends Activity implements PayloadStore.Log {
                     + "/odm/bin:/vendor/bin:/vendor/xbin";
     private static final long MAX_RUNTIME_MS = 15 * 60 * 1000L;
     private static final int LOG_LIMIT = 150_000;
+    private static final String UI_PREFS = "ionstack-ui";
+    private static final String PREF_DARK = "dark";
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -61,10 +65,22 @@ public class MainActivity extends Activity implements PayloadStore.Log {
     private Button restartUiButton;
     private EditText commandInput;
     private CheckBox forceCheck;
+    private CheckBox darkCheck;
     private volatile Process activeProcess;
+
+    private boolean isDarkEnabled() {
+        SharedPreferences prefs = getSharedPreferences(UI_PREFS, MODE_PRIVATE);
+        if (prefs.contains(PREF_DARK)) {
+            return prefs.getBoolean(PREF_DARK, false);
+        }
+        return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        setTheme(isDarkEnabled() ? android.R.style.Theme_Material
+                : android.R.style.Theme_Material_Light);
         super.onCreate(savedInstanceState);
         setContentView(buildUi());
 
@@ -141,6 +157,17 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         forceCheck.setText("Force run on non-matching firmware");
         forceCheck.setTextSize(12);
         root.addView(forceCheck);
+
+        darkCheck = new CheckBox(this);
+        darkCheck.setText("Dark mode");
+        darkCheck.setTextSize(12);
+        darkCheck.setChecked(isDarkEnabled());
+        darkCheck.setOnCheckedChangeListener((buttonView, checked) -> {
+            getSharedPreferences(UI_PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(PREF_DARK, checked).apply();
+            recreate();
+        });
+        root.addView(darkCheck);
 
         TextView rootLabel = new TextView(this);
         rootLabel.setText("Root command (after a successful run)");
