@@ -10,7 +10,12 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
+import android.text.Spannable;
+import android.text.SpannableStringBuilder;
 import android.text.method.ScrollingMovementMethod;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.StyleSpan;
+import android.text.style.UnderlineSpan;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -78,6 +83,9 @@ public class MainActivity extends Activity implements PayloadStore.Log {
     private volatile boolean ksuRoot;
     private volatile String ksuSuPath = "su";
 
+    private boolean darkTheme;
+    private int ansiDefaultColor = 0xFFF0F0F0;
+
     private static final String[] SU_CANDIDATES = {
             "su", "/data/adb/ksu/bin/su", "/system/bin/su",
     };
@@ -93,7 +101,9 @@ public class MainActivity extends Activity implements PayloadStore.Log {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        setTheme(isDarkEnabled() ? android.R.style.Theme_Material
+        darkTheme = isDarkEnabled();
+        ansiDefaultColor = darkTheme ? 0xFFF2F2F2 : 0xFF111111;
+        setTheme(darkTheme ? android.R.style.Theme_Material
                 : android.R.style.Theme_Material_Light);
         super.onCreate(savedInstanceState);
         setContentView(buildUi());
@@ -129,11 +139,13 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         title.setText("S908E IonStack Root");
         title.setTextSize(22);
         title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextColor(accentColor());
         root.addView(title);
 
         statusView = new TextView(this);
         statusView.setTextSize(14);
         statusView.setPadding(0, dp(8), 0, dp(4));
+        statusView.setTextColor(accentColor());
         root.addView(statusView);
 
         gateView = new TextView(this);
@@ -187,6 +199,7 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         rootLabel.setText("Root command (after a successful run)");
         rootLabel.setTextSize(14);
         rootLabel.setPadding(0, dp(8), 0, 0);
+        rootLabel.setTextColor(accentColor());
         root.addView(rootLabel);
 
         commandInput = new EditText(this);
@@ -224,6 +237,7 @@ public class MainActivity extends Activity implements PayloadStore.Log {
 
         logView = new TextView(this);
         logView.setTextSize(11);
+        logView.setTextColor(ansiDefaultColor);
         logView.setTypeface(Typeface.MONOSPACE);
         logView.setTextIsSelectable(true);
         logView.setMovementMethod(new ScrollingMovementMethod());
@@ -677,7 +691,7 @@ public class MainActivity extends Activity implements PayloadStore.Log {
                 logBuffer.delete(0, logBuffer.length() - LOG_LIMIT / 2);
                 logBuffer.insert(0, "[... earlier output dropped ...]\n");
             }
-            logView.setText(logBuffer);
+            logView.setText(renderLog());
             if (follow) {
                 // The ScrollView is the scroller; scrolling logView does nothing.
                 logScroll.post(() -> logScroll.scrollTo(0, logView.getBottom()));
@@ -686,6 +700,38 @@ public class MainActivity extends Activity implements PayloadStore.Log {
     }
 
     /** True when the user is parked at the newest log line. */
+    /** Paints the raw log, honouring the ANSI colours the payload prints. */
+    private CharSequence renderLog() {
+        SpannableStringBuilder out = new SpannableStringBuilder();
+        for (AnsiLog.Run run : AnsiLog.parse(logBuffer, ansiDefaultColor, darkTheme)) {
+            int start = out.length();
+            out.append(run.text);
+            int end = out.length();
+            if (run.color != ansiDefaultColor) {
+                out.setSpan(new ForegroundColorSpan(run.color), start, end,
+                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            if (run.bold) {
+                out.setSpan(new StyleSpan(Typeface.BOLD), start, end,
+                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            if (run.italic) {
+                out.setSpan(new StyleSpan(Typeface.ITALIC), start, end,
+                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            if (run.underline) {
+                out.setSpan(new UnderlineSpan(), start, end,
+                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+        }
+        return out;
+    }
+
+    /** Green chrome; darker in light mode so it stays readable. */
+    private int accentColor() {
+        return darkTheme ? 0xFF6BE86B : 0xFF0A6B0A;
+    }
+
     private boolean isLogAtBottom() {
         View child = logScroll.getChildAt(0);
         if (child == null || logScroll.getHeight() == 0) {
