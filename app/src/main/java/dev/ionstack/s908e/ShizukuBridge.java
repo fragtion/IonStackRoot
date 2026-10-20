@@ -1,7 +1,6 @@
 package dev.ionstack.s908e;
 
 import android.os.ParcelFileDescriptor;
-import android.os.SystemClock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -155,32 +154,41 @@ final class ShizukuBridge {
     static String capture(String[] cmd, String[] env, String dir) throws IOException, InterruptedException {
         Process process = exec(cmd, env, dir);
         StringBuilder out = new StringBuilder();
+        // Read each stream to EOF in its own thread. Polling available() loses
+        // output from short-lived commands: the pipe can report 0 bytes while
+        // data is still in flight, and the process may exit before it lands.
+        Thread stdout = drainTo(process.getInputStream(), out);
+        Thread stderr = drainTo(process.getErrorStream(), out);
         try {
-            byte[] buffer = new byte[4096];
-            while (process.isAlive()) {
-                drain(process.getInputStream(), out, buffer);
-                drain(process.getErrorStream(), out, buffer);
-                SystemClock.sleep(50);
-            }
-            drain(process.getInputStream(), out, buffer);
-            drain(process.getErrorStream(), out, buffer);
             process.waitFor();
         } finally {
             if (process.isAlive()) {
                 process.destroy();
             }
         }
-        return out.toString();
+        stdout.join(2000);
+        stderr.join(2000);
+        synchronized (out) {
+            return out.toString();
+        }
     }
 
-    private static void drain(InputStream stream, StringBuilder out, byte[] buffer) throws IOException {
-        while (stream.available() > 0) {
-            int read = stream.read(buffer);
-            if (read <= 0) {
-                return;
+    private static Thread drainTo(InputStream stream, StringBuilder out) {
+        Thread thread = new Thread(() -> {
+            byte[] buffer = new byte[4096];
+            try {
+                int read;
+                while ((read = stream.read(buffer)) > 0) {
+                    synchronized (out) {
+                        out.append(new String(buffer, 0, read));
+                    }
+                }
+            } catch (IOException ignored) {
             }
-            out.append(new String(buffer, 0, read));
-        }
+        }, "shizuku-capture");
+        thread.setDaemon(true);
+        thread.start();
+        return thread;
     }
 
     static String shellQuote(String value) {

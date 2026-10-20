@@ -103,10 +103,14 @@ final class PayloadStore {
     }
 
     private static String remoteDigest(String remote) throws Exception {
-        String out = ShizukuBridge.capture(
-                new String[]{"/system/bin/sha256sum", remote}, null, REMOTE_DIR).trim();
+        String out = ShizukuBridge.capture(new String[]{"/system/bin/sh", "-c",
+                        "sha256sum " + ShizukuBridge.shellQuote(remote)}, null, REMOTE_DIR).trim();
         String[] parts = out.split("\\s+");
-        return parts.length > 0 ? parts[0] : "";
+        if (parts.length == 0 || !parts[0].matches("[0-9a-fA-F]{64}")) {
+            throw new IOException("sha256sum produced no usable output for " + remote
+                    + (out.isEmpty() ? " (empty)" : " (" + out + ")"));
+        }
+        return parts[0];
     }
 
     private static String digest(AssetManager assets, String asset) throws Exception {
