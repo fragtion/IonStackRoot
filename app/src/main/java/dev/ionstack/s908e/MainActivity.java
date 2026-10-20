@@ -55,6 +55,8 @@ public class MainActivity extends Activity implements PayloadStore.Log {
     private TextView statusView;
     private TextView gateView;
     private TextView logView;
+    private ScrollView logScroll;
+    private boolean followLogs = true;
     private Button grantButton;
     private Button stageButton;
     private Button runButton;
@@ -200,11 +202,13 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         root.addView(restartUiButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        ScrollView scroll = new ScrollView(this);
+        logScroll = new ScrollView(this);
         LinearLayout.LayoutParams scrollParams =
                 new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
         scrollParams.topMargin = dp(8);
-        scroll.setLayoutParams(scrollParams);
+        logScroll.setLayoutParams(scrollParams);
+        logScroll.setOnScrollChangeListener((view, scrollX, scrollY, oldScrollX, oldScrollY) ->
+                followLogs = isLogAtBottom());
 
         logView = new TextView(this);
         logView.setTextSize(11);
@@ -212,9 +216,9 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         logView.setTextIsSelectable(true);
         logView.setMovementMethod(new ScrollingMovementMethod());
         logView.setPadding(dp(8), dp(8), dp(8), dp(8));
-        scroll.addView(logView, new ScrollView.LayoutParams(
+        logScroll.addView(logView, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        root.addView(scroll);
+        root.addView(logScroll);
 
         return root;
     }
@@ -566,20 +570,27 @@ public class MainActivity extends Activity implements PayloadStore.Log {
 
     private void appendLog(String text) {
         ui.post(() -> {
+            boolean follow = followLogs;
             logBuffer.append(text);
             if (logBuffer.length() > LOG_LIMIT) {
                 logBuffer.delete(0, logBuffer.length() - LOG_LIMIT / 2);
                 logBuffer.insert(0, "[... earlier output dropped ...]\n");
             }
             logView.setText(logBuffer);
-            if (logView.getLayout() != null && logView.getLineCount() > 0) {
-                int scroll = logView.getLayout().getLineTop(logView.getLineCount() - 1)
-                        - logView.getHeight();
-                if (scroll > 0) {
-                    logView.scrollTo(0, scroll);
-                }
+            if (follow) {
+                // The ScrollView is the scroller; scrolling logView does nothing.
+                logScroll.post(() -> logScroll.scrollTo(0, logView.getBottom()));
             }
         });
+    }
+
+    /** True when the user is parked at the newest log line. */
+    private boolean isLogAtBottom() {
+        View child = logScroll.getChildAt(0);
+        if (child == null || logScroll.getHeight() == 0) {
+            return true;
+        }
+        return child.getBottom() - (logScroll.getHeight() + logScroll.getScrollY()) <= dp(24);
     }
 
     @Override
