@@ -58,6 +58,7 @@ public class MainActivity extends Activity implements PayloadStore.Log {
     private Button loadKsuButton;
     private Button checkButton;
     private Button commandButton;
+    private Button restartUiButton;
     private EditText commandInput;
     private CheckBox forceCheck;
     private volatile Process activeProcess;
@@ -167,6 +168,11 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         row3.addView(checkButton, weight());
         root.addView(row3);
 
+        restartUiButton = button("Restart SystemUI (root)");
+        restartUiButton.setOnClickListener(v -> restartSystemUi());
+        root.addView(restartUiButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         ScrollView scroll = new ScrollView(this);
         LinearLayout.LayoutParams scrollParams =
                 new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
@@ -217,6 +223,7 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         loadKsuButton.setEnabled(!busy.get() && running && granted);
         commandButton.setEnabled(!busy.get() && running && granted);
         checkButton.setEnabled(!busy.get() && running && granted);
+        restartUiButton.setEnabled(!busy.get() && running && granted);
     }
 
     private void setBusy(boolean value) {
@@ -468,6 +475,18 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         thread.setDaemon(true);
         thread.start();
         return thread;
+    }
+
+    private void restartSystemUi() {
+        if (busy.get()) {
+            return;
+        }
+        if (!ShizukuBridge.isRunning() || !ShizukuBridge.isGranted()) {
+            requestShizuku();
+            return;
+        }
+        appendLog("\n[*] restarting SystemUI\n");
+        runRootCommandInternal("pkill -f com.android.systemui");
     }
 
     private void runRootCommand() {
