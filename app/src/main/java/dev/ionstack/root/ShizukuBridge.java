@@ -1,4 +1,4 @@
-package dev.ionstack.s908e;
+package dev.ionstack.root;
 
 import android.os.ParcelFileDescriptor;
 

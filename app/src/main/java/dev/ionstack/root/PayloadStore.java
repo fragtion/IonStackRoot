@@ -1,4 +1,4 @@
-package dev.ionstack.s908e;
+package dev.ionstack.root;
 
 import android.content.res.AssetManager;
 
@@ -9,7 +9,14 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
-/** Stages bundled payloads into /data/local/tmp via Shizuku. */
+/**
+ * Stages bundled payloads into /data/local/tmp via Shizuku.
+ *
+ * Layout: assets/payload/<BUILD>/ holds the exploit library and root helper
+ * built for that firmware; assets/payload/common/ holds the KernelSU late-load
+ * files shared by every target. The exploit stage (cve-exp32/cve-exp64) is
+ * embedded inside the library, so it is not staged separately.
+ */
 final class PayloadStore {
 
     interface Log {
@@ -18,17 +25,12 @@ final class PayloadStore {
 
     static final String REMOTE_DIR = "/data/local/tmp";
 
-    private static final Map<String, String> FILES = new LinkedHashMap<>();
     private static final Map<String, String> KSU_FILES = new LinkedHashMap<>();
 
     static {
-        FILES.put("cve-2026-43499", "payload/cve-2026-43499");
-        FILES.put("cve-2026-43499-root", "payload/cve-2026-43499-root");
-        FILES.put("cve-exp32", "payload/cve-exp32");
-
-        KSU_FILES.put("kernelsu.ko", "payload/kernelsu.ko");
-        KSU_FILES.put("patch_table.txt", "payload/patch_table.txt");
-        KSU_FILES.put("kernelsu.sh", "payload/kernelsu.sh");
+        KSU_FILES.put("kernelsu.ko", "payload/common/kernelsu.ko");
+        KSU_FILES.put("patch_table.txt", "payload/common/patch_table.txt");
+        KSU_FILES.put("kernelsu.sh", "payload/common/kernelsu.sh");
     }
 
     private PayloadStore() {
@@ -38,8 +40,36 @@ final class PayloadStore {
         return REMOTE_DIR + "/" + name;
     }
 
-    static void stageAll(AssetManager assets, Log log) throws Exception {
-        stage(FILES, assets, log);
+    private static Map<String, String> payloadFiles(Targets.Target target) {
+        Map<String, String> files = new LinkedHashMap<>();
+        files.put("cve-2026-43499", "payload/" + target.build + "/cve-2026-43499");
+        files.put("cve-2026-43499-root", "payload/" + target.build + "/cve-2026-43499-root");
+        return files;
+    }
+
+    /** Both firmware-specific binaries are present and byte-identical to the assets. */
+    static boolean isStaged(Targets.Target target, AssetManager assets) {
+        if (target == null) {
+            return false;
+        }
+        try {
+            for (Map.Entry<String, String> entry : payloadFiles(target).entrySet()) {
+                String remote = remotePath(entry.getKey());
+                if (!digest(assets, entry.getValue()).equalsIgnoreCase(remoteDigest(remote))) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static void stageAll(Targets.Target target, AssetManager assets, Log log) throws Exception {
+        if (target == null) {
+            throw new IOException("no payload for this firmware");
+        }
+        stage(payloadFiles(target), assets, log);
     }
 
     static void stageKernelSu(AssetManager assets, Log log) throws Exception {
@@ -60,14 +90,6 @@ final class PayloadStore {
         return cmd.toString();
     }
 
-    static boolean isStaged() {
-        return allExist(new String[]{
-                remotePath("cve-2026-43499"),
-                remotePath("cve-2026-43499-root"),
-                remotePath("cve-exp32"),
-        });
-    }
-
     private static void stage(Map<String, String> files, AssetManager assets, Log log) throws Exception {
         for (Map.Entry<String, String> entry : files.entrySet()) {
             String name = entry.getKey();
@@ -84,21 +106,6 @@ final class PayloadStore {
                         + " (local " + localDigest + ", remote " + remoteDigest + ")");
             }
             log.line("[+] " + remote + " sha256=" + localDigest);
-        }
-    }
-
-    private static boolean allExist(String[] paths) {
-        StringBuilder cmd = new StringBuilder();
-        for (String path : paths) {
-            cmd.append("test -x ").append(ShizukuBridge.shellQuote(path)).append(" && ");
-        }
-        cmd.append("echo STAGED");
-        try {
-            String out = ShizukuBridge.capture(
-                    new String[]{"/system/bin/sh", "-c", cmd.toString()}, null, REMOTE_DIR);
-            return out.contains("STAGED");
-        } catch (Exception e) {
-            return false;
         }
     }
 

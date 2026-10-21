@@ -1,11 +1,13 @@
-package dev.ionstack.s908e;
+package dev.ionstack.root;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Insets;
 import android.graphics.Typeface;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -37,11 +39,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * One-click runner for the S908EXXSEGZH4 (SM-S908E, 5.10 b0q) IonStack payload.
+ * One-click runner for the bundled IonStack payloads (Samsung 5.10 kernels).
  *
- * The payloads are built for the Android shell user (uid 2000), so everything is
- * staged into /data/local/tmp and executed through Shizuku. Payload execution and
- * shell-bridge structure follow BuSung-dev/Root-My-Galaxy (Apache-2.0).
+ * The running firmware is matched against {@link Targets}. Only S908EXXSEGZH4 has
+ * been run on hardware; every other build is offered as untested with a report
+ * link. Payloads are built for the Android shell user (uid 2000), so everything
+ * is staged into /data/local/tmp and executed through Shizuku. Payload execution
+ * and shell-bridge structure follow BuSung-dev/Root-My-Galaxy (Apache-2.0).
  */
 public class MainActivity extends Activity implements PayloadStore.Log {
 
@@ -77,6 +81,8 @@ public class MainActivity extends Activity implements PayloadStore.Log {
     private CheckBox forceCheck;
     private CheckBox darkCheck;
     private volatile Process activeProcess;
+    private volatile Targets.Target target;
+    private DeviceGate.Result gateResult;
 
     // KernelSU takes over after the late-load; the IonStack daemon socket then
     // stops accepting connections, so root commands switch to KSU's su.
@@ -108,15 +114,29 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         super.onCreate(savedInstanceState);
         setContentView(buildUi());
 
-        DeviceGate.Result gate = DeviceGate.check();
-        gateView.setText(gate.detail);
-        appendLog("S908E IonStack runner\n");
-        appendLog("Payload: S908EXXSEGZH4 (SM-S908E, b0q 5.10)\n");
+        gateResult = DeviceGate.check();
+        target = gateResult.target;
+        gateView.setText(gateResult.detail);
+        appendLog("IonStack Root\n");
+        if (target == null) {
+            appendLog("[-] no payload for this firmware\n");
+            appendLog("[i] report it at " + Targets.REPORT_URL + "\n");
+        } else {
+            appendLog((target.verified ? "[+] " : "[!] ") + "target " + target.build
+                    + " (" + target.describe() + ")\n");
+            appendLog(target.verified ? "[+] firmware verified on hardware\n"
+                    : "[!] firmware untested; report results at " + Targets.REPORT_URL + "\n");
+        }
         appendLog("Transport: Shizuku shell (uid 2000)\n\n");
         refreshStatus();
+        if (target == null) {
+            ui.post(this::showUnsupportedDialog);
+        } else if (!target.verified) {
+            ui.post(this::showUntestedDialog);
+        }
         executor.execute(() -> {
             boolean staged = ShizukuBridge.isRunning() && ShizukuBridge.isGranted()
-                    && PayloadStore.isStaged();
+                    && PayloadStore.isStaged(target, getAssets());
             ui.post(() -> appendLog(staged
                     ? "[+] payloads already staged in /data/local/tmp\n"
                     : "[*] payloads not staged yet\n"));
@@ -136,7 +156,7 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         });
 
         TextView title = new TextView(this);
-        title.setText("S908E IonStack Root");
+        title.setText("IonStack Root");
         title.setTextSize(22);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextColor(accentColor());
@@ -180,7 +200,7 @@ public class MainActivity extends Activity implements PayloadStore.Log {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         forceCheck = new CheckBox(this);
-        forceCheck.setText("Force run on non-matching firmware");
+        forceCheck.setText("Allow untested firmware/build");
         forceCheck.setTextSize(12);
         root.addView(forceCheck);
 
@@ -272,13 +292,14 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         boolean granted = running && ShizukuBridge.isGranted();
         statusView.setText("Shizuku: " + (running ? (granted ? "running, granted" : "running, permission needed")
                 : "not running") +
-                "   |   Payload: " + (busy.get() ? "running" : "idle") +
+                "   |   Target: " + (target == null ? "unsupported" : target.build) +
                 "   |   Root: " + (ksuRoot ? "KernelSU" : "daemon"));
+        boolean runnable = target != null;
         grantButton.setEnabled(!busy.get());
-        stageButton.setEnabled(!busy.get() && running && granted);
-        runButton.setEnabled(!busy.get() && running && granted);
+        stageButton.setEnabled(!busy.get() && running && granted && runnable);
+        runButton.setEnabled(!busy.get() && running && granted && runnable);
         stopButton.setEnabled(busy.get());
-        loadKsuButton.setEnabled(!busy.get() && running && granted);
+        loadKsuButton.setEnabled(!busy.get() && running && granted && runnable);
         boolean rootReady = ksuRoot || (running && granted);
         commandButton.setEnabled(!busy.get() && rootReady);
         checkButton.setEnabled(!busy.get() && rootReady);
@@ -329,8 +350,12 @@ public class MainActivity extends Activity implements PayloadStore.Log {
         executor.execute(() -> {
             setBusy(true);
             try {
-                appendLog("[*] staging payloads over Shizuku\n");
-                PayloadStore.stageAll(getAssets(), this);
+                if (target == null) {
+                    appendLog("[-] no payload for this firmware\n");
+                    return;
+                }
+                appendLog("[*] staging payloads for " + target.build + " over Shizuku\n");
+                PayloadStore.stageAll(target, getAssets(), this);
                 appendLog("[+] staging complete\n");
             } catch (Throwable t) {
                 appendLog("[-] staging failed: " + t.getMessage() + "\n");
@@ -341,14 +366,16 @@ public class MainActivity extends Activity implements PayloadStore.Log {
     }
 
     private void confirmRun() {
-        DeviceGate.Result gate = DeviceGate.check();
-        if (!gate.matches && !forceCheck.isChecked()) {
-            new AlertDialog.Builder(this)
-                    .setTitle("Firmware does not match")
-                    .setMessage(gate.detail + "\n\nThis payload is built for SM-S908E "
-                            + "S908EXXSEGZH4 only. Refusing to run.")
-                    .setPositiveButton("OK", null)
-                    .show();
+        gateResult = DeviceGate.check();
+        target = gateResult.target;
+        gateView.setText(gateResult.detail);
+        refreshStatus();
+        if (target == null) {
+            showUnsupportedDialog();
+            return;
+        }
+        if (!target.verified && !forceCheck.isChecked()) {
+            showUntestedDialog(true);
             return;
         }
         new AlertDialog.Builder(this)
@@ -362,13 +389,24 @@ public class MainActivity extends Activity implements PayloadStore.Log {
     }
 
     private void confirmKernelSu() {
-        DeviceGate.Result gate = DeviceGate.check();
-        if (!gate.matches && !forceCheck.isChecked()) {
+        gateResult = DeviceGate.check();
+        target = gateResult.target;
+        gateView.setText(gateResult.detail);
+        refreshStatus();
+        if (target == null) {
+            showUnsupportedDialog();
+            return;
+        }
+        if (!target.verified) {
             new AlertDialog.Builder(this)
-                    .setTitle("Firmware does not match")
-                    .setMessage(gate.detail + "\n\nThis module is built for SM-S908E "
-                            + "S908EXXSEGZH4 only. Refusing to load it.")
-                    .setPositiveButton("OK", null)
+                    .setTitle("KernelSU not validated")
+                    .setMessage("The bundled kernelsu.ko has only been loaded on "
+                            + "SM-S908E / S908EXXSEGZH4. Loading it on " + target.label()
+                            + " can panic the kernel.\n\nReport results at "
+                            + Targets.REPORT_URL)
+                    .setNegativeButton("Cancel", null)
+                    .setNeutralButton("Open report page", (d, w) -> openReportPage())
+                    .setPositiveButton("Load anyway", (d, w) -> executeKernelSu())
                     .show();
             return;
         }
@@ -395,9 +433,9 @@ public class MainActivity extends Activity implements PayloadStore.Log {
             setBusy(true);
             appendLog("\n[*] KernelSU late-load\n");
             try {
-                if (!PayloadStore.isStaged()) {
+                if (!PayloadStore.isStaged(target, getAssets())) {
                     appendLog("[*] exploit payloads missing, staging first\n");
-                    PayloadStore.stageAll(getAssets(), this);
+                    PayloadStore.stageAll(target, getAssets(), this);
                 }
 
                 String helper = PayloadStore.remotePath("cve-2026-43499-root");
@@ -466,9 +504,9 @@ public class MainActivity extends Activity implements PayloadStore.Log {
             setBusy(true);
             appendLog("\n[*] checking staged payloads\n");
             try {
-                if (!PayloadStore.isStaged()) {
+                if (!PayloadStore.isStaged(target, getAssets())) {
                     appendLog("[*] payloads missing, staging first\n");
-                    PayloadStore.stageAll(getAssets(), this);
+                    PayloadStore.stageAll(target, getAssets(), this);
                 }
                 String[] env = new String[]{
                         "PATH=" + SHELL_PATH,
@@ -476,7 +514,8 @@ public class MainActivity extends Activity implements PayloadStore.Log {
                         "LD_PRELOAD=" + PayloadStore.remotePath("cve-2026-43499"),
                         "EXPLOIT_ATTEMPTS=16",
                 };
-                appendLog("[*] starting exploit as uid 2000 (Shizuku)\n");
+                appendLog("[*] starting exploit for " + target.build
+                        + " as uid 2000 (Shizuku)\n");
                 long startedAt = System.currentTimeMillis();
                 Process process = ShizukuBridge.exec(
                         new String[]{"/system/bin/sh", "-c", "true"}, env, "/data/local/tmp");
@@ -675,6 +714,50 @@ public class MainActivity extends Activity implements PayloadStore.Log {
             if (process != null && process.isAlive()) {
                 process.destroy();
             }
+        }
+    }
+
+    /** Warns that the matched firmware has no verified run on hardware yet. */
+    private void showUntestedDialog() {
+        showUntestedDialog(false);
+    }
+
+    private void showUntestedDialog(boolean thenRun) {
+        if (target == null) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Untested firmware")
+                .setMessage(target.label() + " has no verified run yet.\n\n"
+                        + "The payload for this build is compiled from its own kernel "
+                        + "offsets, but it has not been run on hardware, so it may fail "
+                        + "or panic the kernel. If it works (or does not), please report "
+                        + "the result at:\n" + Targets.REPORT_URL)
+                .setNegativeButton("Cancel", null)
+                .setNeutralButton("Open report page", (d, w) -> openReportPage())
+                .setPositiveButton(thenRun ? "Run anyway" : "OK",
+                        thenRun ? (d, w) -> executeExploit() : null)
+                .show();
+    }
+
+    /** No bundled payload matches this firmware build. */
+    private void showUnsupportedDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("Firmware not supported")
+                .setMessage((gateResult == null ? "" : gateResult.detail + "\n\n")
+                        + "No payload is bundled for this firmware build. Report the model "
+                        + "and build to get it added:\n" + Targets.REPORT_URL)
+                .setPositiveButton("OK", null)
+                .setNeutralButton("Open report page", (d, w) -> openReportPage())
+                .show();
+    }
+
+    private void openReportPage() {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(Targets.REPORT_URL)));
+        } catch (Throwable t) {
+            appendLog("[-] could not open " + Targets.REPORT_URL + ": "
+                    + t.getMessage() + "\n");
         }
     }
 

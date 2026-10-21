@@ -3,15 +3,15 @@ plugins {
 }
 
 android {
-    namespace 'dev.ionstack.s908e'
+    namespace 'dev.ionstack.root'
     compileSdk 36
 
     defaultConfig {
-        applicationId 'dev.ionstack.s908e'
-        minSdk 33
+        applicationId 'dev.ionstack.root'
+        minSdk 31
         targetSdk 36
-        versionCode 1
-        versionName '1.0'
+        versionCode 2
+        versionName '2.0'
     }
 
     buildTypes {
